@@ -12,7 +12,8 @@
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write src/",
     "db:migrate": "node src/scripts/migrate.js",
-    "db:seed": "node src/scripts/seed.js"
+    "db:seed": "node src/scripts/seed.js",
+    "build": "echo 'No build step required'"
   },
   "keywords": [
     "templates",
@@ -45,7 +46,7 @@
     "supertest": "^6.3.4"
   },
   "engines": {
-    "node": ">=16.0.0",
+    "node": ">=18.0.0",
     "npm": ">=8.0.0"
   }
 }

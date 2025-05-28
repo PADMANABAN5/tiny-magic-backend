@@ -28,7 +28,7 @@ class TemplateController {
                 query = `
                     SELECT id, username, template_type, content, version, is_active, created_at, updated_at
                     FROM prompt_templates 
-                    WHERE username = ? AND template_type = ? AND version = ?
+                    WHERE username = $1 AND template_type = $2 AND version = $3
                 `;
                 params = [username, templateType, parseInt(version)];
             } else if (includeHistory === 'true') {
@@ -36,7 +36,7 @@ class TemplateController {
                 query = `
                     SELECT id, username, template_type, content, version, is_active, created_at, updated_at
                     FROM prompt_templates 
-                    WHERE username = ? AND template_type = ?
+                    WHERE username = $1 AND template_type = $2
                     ORDER BY version DESC
                 `;
                 params = [username, templateType];
@@ -45,14 +45,14 @@ class TemplateController {
                 query = `
                     SELECT id, username, template_type, content, version, is_active, created_at, updated_at
                     FROM prompt_templates 
-                    WHERE username = ? AND template_type = ? AND is_active = TRUE
+                    WHERE username = $1 AND template_type = $2 AND is_active = TRUE
                 `;
                 params = [username, templateType];
             }
 
-            const [rows] = await pool.execute(query, params);
+            const result = await pool.query(query, params);
 
-            if (rows.length === 0) {
+            if (result.rows.length === 0) {
                 return res.status(404).json({
                     error: 'Template not found',
                     message: `No template found for user: ${username}, type: ${templateType}`
@@ -60,11 +60,11 @@ class TemplateController {
             }
 
             const responseData = includeHistory === 'true' ? {
-                templates: rows,
-                totalVersions: rows.length,
-                latestVersion: Math.max(...rows.map(t => t.version))
+                templates: result.rows,
+                totalVersions: result.rows.length,
+                latestVersion: Math.max(...result.rows.map(t => t.version))
             } : {
-                template: rows[0]
+                template: result.rows[0]
             };
 
             res.json({
@@ -80,7 +80,7 @@ class TemplateController {
 
     // Create or update template (creates new version)
     async updateTemplate(req, res, next) {
-        const connection = await pool.getConnection();
+        const client = await pool.connect();
         
         try {
             const { username, templateType, content } = req.body;
@@ -98,48 +98,62 @@ class TemplateController {
                 });
             }
 
-            await connection.beginTransaction();
+            await client.query('BEGIN');
 
-            // Get next version number
-            const [versionResult] = await connection.execute(
-                'SELECT COALESCE(MAX(version), 0) + 1 as next_version FROM prompt_templates WHERE username = ? AND template_type = ?',
-                [username, templateType]
-            );
-            const nextVersion = versionResult[0].next_version;
+            // Get next version number using PostgreSQL function or manual query
+            let nextVersion;
+            try {
+                // Try using the PostgreSQL function if it exists
+                const versionResult = await client.query(
+                    'SELECT get_next_version($1, $2) as next_version',
+                    [username, templateType]
+                );
+                nextVersion = versionResult.rows[0].next_version;
+            } catch (functionError) {
+                // Fallback to manual query if function doesn't exist
+                const versionResult = await client.query(
+                    'SELECT COALESCE(MAX(version), 0) + 1 as next_version FROM prompt_templates WHERE username = $1 AND template_type = $2',
+                    [username, templateType]
+                );
+                nextVersion = versionResult.rows[0].next_version;
+            }
 
             // Deactivate current active version
-            await connection.execute(
-                'UPDATE prompt_templates SET is_active = FALSE WHERE username = ? AND template_type = ? AND is_active = TRUE',
+            await client.query(
+                'UPDATE prompt_templates SET is_active = FALSE WHERE username = $1 AND template_type = $2 AND is_active = TRUE',
                 [username, templateType]
             );
 
             // Insert new version
-            const [insertResult] = await connection.execute(
+            const insertResult = await client.query(
                 `INSERT INTO prompt_templates (username, template_type, content, version, is_active, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, TRUE, NOW(), NOW())`,
+                 VALUES ($1, $2, $3, $4, TRUE, NOW(), NOW())
+                 RETURNING id, version, created_at`,
                 [username, templateType, content, nextVersion]
             );
 
-            await connection.commit();
+            await client.query('COMMIT');
+
+            const newTemplate = insertResult.rows[0];
 
             res.status(201).json({
                 success: true,
                 message: 'Template updated successfully',
                 data: {
-                    id: insertResult.insertId,
+                    id: newTemplate.id,
                     username,
                     templateType,
-                    version: nextVersion,
-                    createdAt: new Date().toISOString()
+                    version: newTemplate.version,
+                    createdAt: newTemplate.created_at
                 }
             });
 
         } catch (error) {
-            await connection.rollback();
+            await client.query('ROLLBACK');
             console.error('Error updating template:', error);
             next(error);
         } finally {
-            connection.release();
+            client.release();
         }
     }
 
@@ -154,21 +168,21 @@ class TemplateController {
                 });
             }
 
-            const [rows] = await pool.execute(`
+            const result = await pool.query(`
                 SELECT 
                     template_type,
                     version,
                     is_active,
                     created_at,
                     updated_at,
-                    CHAR_LENGTH(content) as content_length
+                    LENGTH(content) as content_length
                 FROM prompt_templates 
-                WHERE username = ? 
+                WHERE username = $1 
                 ORDER BY template_type, version DESC
             `, [username]);
 
             // Group by template type
-            const templatesByType = rows.reduce((acc, template) => {
+            const templatesByType = result.rows.reduce((acc, template) => {
                 if (!acc[template.template_type]) {
                     acc[template.template_type] = [];
                 }
@@ -181,7 +195,7 @@ class TemplateController {
                 data: {
                     username,
                     templates: templatesByType,
-                    totalTemplates: rows.length
+                    totalTemplates: result.rows.length
                 }
             });
 
@@ -193,7 +207,7 @@ class TemplateController {
 
     // Delete template(s)
     async deleteTemplate(req, res, next) {
-        const connection = await pool.getConnection();
+        const client = await pool.connect();
         
         try {
             const { username, templateType, version, deleteAll = false } = req.body;
@@ -204,53 +218,53 @@ class TemplateController {
                 });
             }
 
-            await connection.beginTransaction();
+            await client.query('BEGIN');
 
             let query, params, message;
 
             if (deleteAll) {
-                query = 'DELETE FROM prompt_templates WHERE username = ? AND template_type = ?';
+                query = 'DELETE FROM prompt_templates WHERE username = $1 AND template_type = $2';
                 params = [username, templateType];
                 message = `All versions of ${templateType} deleted for user ${username}`;
             } else if (version) {
-                query = 'DELETE FROM prompt_templates WHERE username = ? AND template_type = ? AND version = ?';
+                query = 'DELETE FROM prompt_templates WHERE username = $1 AND template_type = $2 AND version = $3';
                 params = [username, templateType, parseInt(version)];
                 message = `Version ${version} of ${templateType} deleted for user ${username}`;
             } else {
-                query = 'DELETE FROM prompt_templates WHERE username = ? AND template_type = ? AND is_active = TRUE';
+                query = 'DELETE FROM prompt_templates WHERE username = $1 AND template_type = $2 AND is_active = TRUE';
                 params = [username, templateType];
                 message = `Active version of ${templateType} deleted for user ${username}`;
             }
 
-            const [result] = await connection.execute(query, params);
+            const result = await client.query(query, params);
 
-            if (result.affectedRows === 0) {
-                await connection.rollback();
+            if (result.rowCount === 0) {
+                await client.query('ROLLBACK');
                 return res.status(404).json({
                     error: 'No matching templates found to delete'
                 });
             }
 
-            await connection.commit();
+            await client.query('COMMIT');
 
             res.json({
                 success: true,
                 message,
-                deletedCount: result.affectedRows
+                deletedCount: result.rowCount
             });
 
         } catch (error) {
-            await connection.rollback();
+            await client.query('ROLLBACK');
             console.error('Error deleting template:', error);
             next(error);
         } finally {
-            connection.release();
+            client.release();
         }
     }
 
     // Restore previous version as active
     async restoreTemplate(req, res, next) {
-        const connection = await pool.getConnection();
+        const client = await pool.connect();
         
         try {
             const { username, templateType, version } = req.body;
@@ -261,34 +275,34 @@ class TemplateController {
                 });
             }
 
-            await connection.beginTransaction();
+            await client.query('BEGIN');
 
             // Check if the version exists
-            const [checkResult] = await connection.execute(
-                'SELECT id FROM prompt_templates WHERE username = ? AND template_type = ? AND version = ?',
+            const checkResult = await client.query(
+                'SELECT id FROM prompt_templates WHERE username = $1 AND template_type = $2 AND version = $3',
                 [username, templateType, parseInt(version)]
             );
 
-            if (checkResult.length === 0) {
-                await connection.rollback();
+            if (checkResult.rows.length === 0) {
+                await client.query('ROLLBACK');
                 return res.status(404).json({
                     error: `Version ${version} not found for ${templateType}`
                 });
             }
 
             // Deactivate current active version
-            await connection.execute(
-                'UPDATE prompt_templates SET is_active = FALSE WHERE username = ? AND template_type = ? AND is_active = TRUE',
+            await client.query(
+                'UPDATE prompt_templates SET is_active = FALSE WHERE username = $1 AND template_type = $2 AND is_active = TRUE',
                 [username, templateType]
             );
 
             // Activate the specified version
-            await connection.execute(
-                'UPDATE prompt_templates SET is_active = TRUE WHERE username = ? AND template_type = ? AND version = ?',
+            await client.query(
+                'UPDATE prompt_templates SET is_active = TRUE WHERE username = $1 AND template_type = $2 AND version = $3',
                 [username, templateType, parseInt(version)]
             );
 
-            await connection.commit();
+            await client.query('COMMIT');
 
             res.json({
                 success: true,
@@ -296,11 +310,11 @@ class TemplateController {
             });
 
         } catch (error) {
-            await connection.rollback();
+            await client.query('ROLLBACK');
             console.error('Error restoring template version:', error);
             next(error);
         } finally {
-            connection.release();
+            client.release();
         }
     }
 
@@ -507,7 +521,7 @@ class TemplateController {
                 });
             }
 
-            // Load prompt template structure (you'll need to create this file)
+            // Load prompt template structure
             const baseDir = path.join(process.cwd(), 'src/data');
             const promptTemplatePath = path.join(baseDir, 'promptTemplate.json');
             
@@ -522,13 +536,13 @@ class TemplateController {
             // Try to get user-specific template variables from database first
             let userVariables;
             try {
-                const [dbResult] = await pool.execute(
-                    'SELECT content FROM prompt_templates WHERE username = ? AND template_type = ? AND is_active = TRUE',
+                const dbResult = await pool.query(
+                    'SELECT content FROM prompt_templates WHERE username = $1 AND template_type = $2 AND is_active = TRUE',
                     [username, 'defaultTemplateValues']
                 );
                 
-                if (dbResult.length > 0) {
-                    userVariables = JSON.parse(dbResult[0].content);
+                if (dbResult.rows.length > 0) {
+                    userVariables = JSON.parse(dbResult.rows[0].content);
                     console.log(`Using database template values for user: ${username}`);
                 } else {
                     throw new Error('No database template found');
@@ -549,13 +563,13 @@ class TemplateController {
             // Try to get system content from database first
             let systemContentTemplate;
             try {
-                const [dbResult] = await pool.execute(
-                    'SELECT content FROM prompt_templates WHERE username = ? AND template_type = ? AND is_active = TRUE',
+                const dbResult = await pool.query(
+                    'SELECT content FROM prompt_templates WHERE username = $1 AND template_type = $2 AND is_active = TRUE',
                     [username, promptType]
                 );
                 
-                if (dbResult.length > 0) {
-                    systemContentTemplate = dbResult[0].content;
+                if (dbResult.rows.length > 0) {
+                    systemContentTemplate = dbResult.rows[0].content;
                     console.log(`Using database system content for user: ${username}, type: ${promptType}`);
                 } else {
                     throw new Error('No database template found');

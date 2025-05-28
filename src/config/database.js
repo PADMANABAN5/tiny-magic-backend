@@ -1,37 +1,27 @@
-// src/config/database.js
-const mysql = require('mysql2/promise');
+const { Pool } = require('pg');
 require('dotenv').config();
 
-// Create connection pool with corrected configuration
-const pool = mysql.createPool({
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT) || 3306,
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || 'root',
-    database: process.env.DB_NAME || 'tinymagiq',
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0,
-    // Remove invalid options for mysql2
-    // acquireTimeout, timeout, reconnect are not valid for mysql2
+// Create connection pool
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.NODE_ENV === 'production' ? { 
+        rejectUnauthorized: false 
+    } : false,
+    max: 20,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 2000,
 });
 
 // Test connection function
 const testConnection = async () => {
     try {
-        const connection = await pool.getConnection();
+        const client = await pool.connect();
         console.log('✅ Database connected successfully');
-        connection.release();
+        client.release();
         return true;
     } catch (error) {
         console.error('❌ Database connection failed:', error.message);
-        console.error('Connection details:', {
-            host: process.env.DB_HOST || 'localhost',
-            port: process.env.DB_PORT || 3306,
-            user: process.env.DB_USER || 'root',
-            database: process.env.DB_NAME || 'tinymagiq',
-            passwordProvided: !!process.env.DB_PASSWORD
-        });
+        console.error('Connection URL format:', process.env.DATABASE_URL?.replace(/:[^:@]*@/, ':****@'));
         return false;
     }
 };

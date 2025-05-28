@@ -3,11 +3,15 @@ const { pool } = require('../config/database');
 const fs = require('fs');
 const path = require('path');
 
+function replacePlaceholders(text, data) {
+    return text.replace(/{{(.*?)}}/g, (_, key) => data[key.trim()] ?? '');
+}
+
 class TemplateController {
     // Create or update template (creates new version) - SIMPLIFIED VERSION
     async updateTemplate(req, res, next) {
         let client;
-        
+
         try {
             const { username, templateType, content } = req.body;
 
@@ -81,7 +85,7 @@ class TemplateController {
 
         } catch (error) {
             console.error('❌ Error updating template:', error);
-            
+
             // Handle specific PostgreSQL errors
             if (error.code === '23505') {
                 return res.status(409).json({
@@ -99,7 +103,7 @@ class TemplateController {
                     message: 'Database transaction was aborted due to an earlier error'
                 });
             }
-            
+
             // Generic error
             return res.status(500).json({
                 error: 'Database error',
@@ -248,7 +252,7 @@ class TemplateController {
     // Delete template(s) - Simplified version
     async deleteTemplate(req, res, next) {
         let client;
-        
+
         try {
             const { username, templateType, version, deleteAll = false } = req.body;
 
@@ -325,7 +329,7 @@ class TemplateController {
     // Restore previous version as active
     async restoreTemplate(req, res, next) {
         let client;
-        
+
         try {
             const { username, templateType, version } = req.body;
 
@@ -411,7 +415,7 @@ class TemplateController {
                     type: 'text'
                 },
                 assessmentPrompt: {
-                    file: 'assessmentPrompt.txt', 
+                    file: 'assessmentPrompt.txt',
                     description: 'Evaluation template for measuring conceptual understanding',
                     type: 'text'
                 },
@@ -467,11 +471,11 @@ class TemplateController {
 
             for (const [type, template] of Object.entries(defaultTemplates)) {
                 const filePath = path.join(baseDir, template.file);
-                
+
                 if (fs.existsSync(filePath)) {
                     const content = fs.readFileSync(filePath, 'utf8');
                     const stats = fs.statSync(filePath);
-                    
+
                     allTemplates[type] = {
                         content,
                         description: template.description,
@@ -541,7 +545,7 @@ class TemplateController {
 
             const baseDir = path.join(process.cwd(), 'src/data');
             const filePath = path.join(baseDir, templateFiles[templateType]);
-            
+
             if (!fs.existsSync(filePath)) {
                 return res.status(404).json({
                     error: 'Default template file not found',
@@ -571,10 +575,11 @@ class TemplateController {
         }
     }
 
-    // Process prompt
+    // Process prompt (your original API with database integration)
+    // Process prompt (updated to handle empty userInput)
     async processPrompt(req, res, next) {
         try {
-            const { username, promptType, llmProvider = 'default', userInput = '' } = req.body;
+            const { username, promptType, llmProvider = 'default', userInput } = req.body;
 
             if (!username || !promptType) {
                 return res.status(400).json({
@@ -582,103 +587,135 @@ class TemplateController {
                 });
             }
 
+            const processedUserInput = userInput || '';
             const baseDir = path.join(process.cwd(), 'src/data');
-            
+
             // Load prompt template structure
             const promptTemplatePath = path.join(baseDir, 'promptTemplate.json');
             if (!fs.existsSync(promptTemplatePath)) {
-                return res.status(404).json({ 
-                    error: 'promptTemplate.json not found' 
+                return res.status(404).json({
+                    error: `'promptTemplate.json' not found.`
                 });
             }
             const promptTemplate = JSON.parse(fs.readFileSync(promptTemplatePath, 'utf8'));
 
-            // Try database first, fallback to files
+            // Step 1: Try to get user-specific template for this promptType from database
+            let systemContentTemplate;
+            let templateSource = 'file'; // Track where the template came from
+
+            try {
+                const dbResult = await pool.query(
+                    'SELECT content FROM prompt_templates WHERE username = $1 AND template_type = $2 AND is_active = TRUE',
+                    [username, promptType]
+                );
+
+                if (dbResult.rows.length > 0) {
+                    // Found user-specific template in database
+                    systemContentTemplate = dbResult.rows[0].content;
+                    templateSource = 'database';
+                    console.log(`✅ Using database template for user: ${username}, type: ${promptType}`);
+                } else {
+                    throw new Error('No user-specific template found in database');
+                }
+            } catch (dbError) {
+                // Fallback to default file system template
+                console.log(`ℹ️  No database template found for user ${username}, type ${promptType}. Using default template.`);
+
+                let systemContentPath;
+                if (promptType === 'conceptMentor') {
+                    systemContentPath = path.join(baseDir, 'conceptMentor.txt');
+                } else if (promptType === 'assessmentPrompt') {
+                    systemContentPath = path.join(baseDir, 'assessmentPrompt.txt');
+                } else {
+                    return res.status(400).json({
+                        error: `Invalid promptType '${promptType}'. Must be 'conceptMentor' or 'assessmentPrompt'.`
+                    });
+                }
+
+                if (!fs.existsSync(systemContentPath)) {
+                    return res.status(404).json({
+                        error: `Default template file '${systemContentPath}' not found.`
+                    });
+                }
+
+                systemContentTemplate = fs.readFileSync(systemContentPath, 'utf8');
+                templateSource = 'file';
+            }
+
+            // Step 2: Get template variables (defaultTemplateValues)
+            // Always try database first for template variables, then fallback to file
             let userVariables;
             try {
                 const dbResult = await pool.query(
                     'SELECT content FROM prompt_templates WHERE username = $1 AND template_type = $2 AND is_active = TRUE',
                     [username, 'defaultTemplateValues']
                 );
-                
+
                 if (dbResult.rows.length > 0) {
                     userVariables = JSON.parse(dbResult.rows[0].content);
+                    console.log(`✅ Using database template values for user: ${username}`);
                 } else {
-                    throw new Error('No database template found');
+                    throw new Error('No database template values found');
                 }
             } catch (dbError) {
+                console.log(`ℹ️  No database template values found for user ${username}. Using default values.`);
+
+                // Fallback to default template values
                 const defaultTemplatePath = path.join(baseDir, 'defaultTemplateValues.txt');
                 if (!fs.existsSync(defaultTemplatePath)) {
                     return res.status(404).json({
-                        error: 'Default template values not found'
+                        error: `Default template values not found at '${defaultTemplatePath}'.`
                     });
                 }
                 userVariables = JSON.parse(fs.readFileSync(defaultTemplatePath, 'utf8'));
             }
 
-            // Get system content
-            let systemContentTemplate;
-            try {
-                const dbResult = await pool.query(
-                    'SELECT content FROM prompt_templates WHERE username = $1 AND template_type = $2 AND is_active = TRUE',
-                    [username, promptType]
-                );
-                
-                if (dbResult.rows.length > 0) {
-                    systemContentTemplate = dbResult.rows[0].content;
-                } else {
-                    throw new Error('No database template found');
-                }
-            } catch (dbError) {
-                const systemContentPath = path.join(baseDir, `${promptType}.txt`);
-                if (!fs.existsSync(systemContentPath)) {
-                    return res.status(404).json({ 
-                        error: `${promptType}.txt file not found` 
-                    });
-                }
-                systemContentTemplate = fs.readFileSync(systemContentPath, 'utf8');
-            }
+            // Step 3: Replace placeholders in the system content
+            const systemContent = replacePlaceholders(systemContentTemplate, userVariables);
 
-            const systemContent = this.replacePlaceholders(systemContentTemplate, userVariables);
-
-            // Load LLM config
+            // Step 4: Load LLM config
             const llmConfigPath = path.join(baseDir, 'llmConfigs.json');
             if (!fs.existsSync(llmConfigPath)) {
-                return res.status(404).json({ 
-                    error: 'llmConfigs.json not found' 
+                return res.status(404).json({
+                    error: `LLM config 'llmConfigs.json' not found.`
                 });
             }
             const llmConfigs = JSON.parse(fs.readFileSync(llmConfigPath, 'utf8'));
             const llmConfig = llmConfigs[llmProvider.toLowerCase()] || llmConfigs.default;
 
+            // Step 5: Build final messages
             const finalMessages = promptTemplate.map(item => {
                 if (item.role === 'system') {
                     return { role: item.role, content: systemContent };
                 }
                 if (item.role === 'user') {
-                    return { role: item.role, content: userInput };
+                    return { role: item.role, content: processedUserInput };
                 }
                 return item;
             });
 
+            // Step 6: Return response with source information
             res.json({
+                success: true,
                 messages: finalMessages,
                 llmConfig,
-                templateSource: 'database'
+                templateSource: templateSource, // 'database' or 'file'
+                metadata: {
+                    username,
+                    promptType,
+                    llmProvider,
+                    userInputLength: processedUserInput.length,
+                    systemContentSource: templateSource === 'database' ? 'User Custom Template' : 'Default Template'
+                }
             });
 
         } catch (error) {
-            console.error('Error processing prompt:', error);
+            console.error('❌ Error processing prompt:', error);
             return res.status(500).json({
-                error: 'Processing error',
-                message: 'Failed to process prompt'
+                error: 'Server error processing prompt',
+                details: error.message
             });
         }
-    }
-
-    // Helper function
-    replacePlaceholders(text, data) {
-        return text.replace(/{{(.*?)}}/g, (_, key) => data[key.trim()] ?? '');
     }
 }
 

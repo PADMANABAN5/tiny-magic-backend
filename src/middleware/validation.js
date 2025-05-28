@@ -44,12 +44,12 @@ const templateRestoreSchema = Joi.object({
     version: Joi.number().integer().min(1).required()
 });
 
-// Prompt processing validation
+// Prompt processing validation - FIXED with explicit empty string allowance
 const promptProcessSchema = Joi.object({
     username: Joi.string().min(1).max(255).required(),
     promptType: Joi.string().valid(...VALID_TEMPLATE_TYPES).required(),
     llmProvider: Joi.string().min(1).max(50).optional().default('default'),
-    userInput: Joi.string().max(10000).optional().default('')
+    userInput: Joi.string().allow('').optional().default('')  // Explicitly allow empty strings
 });
 
 // Reset to default validation

@@ -9,6 +9,8 @@ function replacePlaceholders(text, data) {
 
 class TemplateController {
     // Create or update template (creates new version) - SIMPLIFIED VERSION
+    // Add this at the very start of your updateTemplate method
+    // Modified updateTemplate method that works around the constraint issue
     async updateTemplate(req, res, next) {
         let client;
 
@@ -28,21 +30,26 @@ class TemplateController {
                 });
             }
 
-            // Get a fresh client for this operation
             client = await pool.connect();
 
-            // Use a single transaction with manual version calculation (no custom function)
             try {
                 await client.query('BEGIN');
 
-                // Get next version number using simple MAX query (no custom function)
+                // Get next version number
                 const versionResult = await client.query(
                     'SELECT COALESCE(MAX(version), 0) + 1 as next_version FROM prompt_templates WHERE username = $1 AND template_type = $2',
                     [username, templateType]
                 );
                 const nextVersion = versionResult.rows[0].next_version;
 
-                // Deactivate current active version
+                // WORKAROUND: Delete old inactive versions to avoid constraint violation
+                // Keep only the current active version before creating new one
+                await client.query(
+                    'DELETE FROM prompt_templates WHERE username = $1 AND template_type = $2 AND is_active = FALSE',
+                    [username, templateType]
+                );
+
+                // Now deactivate current active version (if any)
                 const updateResult = await client.query(
                     'UPDATE prompt_templates SET is_active = FALSE WHERE username = $1 AND template_type = $2 AND is_active = TRUE',
                     [username, templateType]
@@ -54,7 +61,6 @@ class TemplateController {
                     [username, templateType, content, nextVersion]
                 );
 
-                // Commit the transaction
                 await client.query('COMMIT');
 
                 const newTemplate = insertResult.rows[0];
@@ -70,11 +76,11 @@ class TemplateController {
                         templateType,
                         version: newTemplate.version,
                         createdAt: newTemplate.created_at
-                    }
+                    },
+                    note: 'Previous inactive versions were removed due to database constraints'
                 });
 
             } catch (transactionError) {
-                // Always rollback on any transaction error
                 try {
                     await client.query('ROLLBACK');
                 } catch (rollbackError) {
@@ -86,25 +92,14 @@ class TemplateController {
         } catch (error) {
             console.error('❌ Error updating template:', error);
 
-            // Handle specific PostgreSQL errors
             if (error.code === '23505') {
                 return res.status(409).json({
                     error: 'Constraint violation',
-                    message: 'Unique constraint failed - there may already be an active template'
-                });
-            } else if (error.code === '42P01') {
-                return res.status(500).json({
-                    error: 'Table not found',
-                    message: 'The prompt_templates table does not exist'
-                });
-            } else if (error.code === '25P02') {
-                return res.status(500).json({
-                    error: 'Transaction error',
-                    message: 'Database transaction was aborted due to an earlier error'
+                    message: 'Database constraint prevents this operation. Please fix the database schema or contact support.',
+                    technical: 'The current constraint design prevents multiple inactive versions. Database schema needs updating.'
                 });
             }
 
-            // Generic error
             return res.status(500).json({
                 error: 'Database error',
                 message: 'Failed to update template',
@@ -112,7 +107,6 @@ class TemplateController {
             });
 
         } finally {
-            // Always release the client
             if (client) {
                 try {
                     client.release();

@@ -507,7 +507,10 @@ class TemplateController {
     }
 
     // Reset template to default
+    // Reset template to default - FIXED VERSION
     async resetToDefault(req, res, next) {
+        let client;
+
         try {
             const { username, templateType, resetToDefault = false } = req.body;
 
@@ -549,23 +552,99 @@ class TemplateController {
 
             const defaultContent = fs.readFileSync(filePath, 'utf8');
 
-            res.json({
-                success: true,
-                message: 'Default template content retrieved for reset',
-                data: {
-                    username,
-                    templateType,
-                    defaultContent,
-                    action: 'ready_for_reset'
+            // Get database connection
+            client = await pool.connect();
+
+            try {
+                await client.query('BEGIN');
+
+                // Check if user has any existing templates of this type
+                const existingResult = await client.query(
+                    'SELECT id, version FROM prompt_templates WHERE username = $1 AND template_type = $2 ORDER BY version DESC LIMIT 1',
+                    [username, templateType]
+                );
+
+                let nextVersion = 1;
+                if (existingResult.rows.length > 0) {
+                    // User has existing templates, get next version number
+                    const versionResult = await client.query(
+                        'SELECT COALESCE(MAX(version), 0) + 1 as next_version FROM prompt_templates WHERE username = $1 AND template_type = $2',
+                        [username, templateType]
+                    );
+                    nextVersion = versionResult.rows[0].next_version;
+
+                    // Deactivate all existing versions
+                    await client.query(
+                        'UPDATE prompt_templates SET is_active = FALSE WHERE username = $1 AND template_type = $2',
+                        [username, templateType]
+                    );
+
+                    // Clean up old inactive versions to avoid constraint issues
+                    await client.query(
+                        'DELETE FROM prompt_templates WHERE username = $1 AND template_type = $2 AND is_active = FALSE AND version < $3',
+                        [username, templateType, nextVersion]
+                    );
                 }
-            });
+
+                // Insert new template with default content
+                const insertResult = await client.query(
+                    'INSERT INTO prompt_templates (username, template_type, content, version, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, TRUE, NOW(), NOW()) RETURNING id, version, created_at',
+                    [username, templateType, defaultContent, nextVersion]
+                );
+
+                await client.query('COMMIT');
+
+                const newTemplate = insertResult.rows[0];
+
+                console.log(`✅ Template reset to default successfully: ${username}/${templateType} v${nextVersion}`);
+
+                res.json({
+                    success: true,
+                    message: `${templateType} template has been reset to default for user ${username}`,
+                    data: {
+                        username,
+                        templateType,
+                        defaultContent,
+                        action: 'reset_completed',
+                        newVersion: newTemplate.version,
+                        templateId: newTemplate.id,
+                        createdAt: newTemplate.created_at
+                    }
+                });
+
+            } catch (transactionError) {
+                try {
+                    await client.query('ROLLBACK');
+                } catch (rollbackError) {
+                    console.error('Rollback failed:', rollbackError);
+                }
+                throw transactionError;
+            }
 
         } catch (error) {
-            console.error('Error processing template reset:', error);
+            console.error('❌ Error resetting template to default:', error);
+
+            if (error.code === '23505') {
+                return res.status(409).json({
+                    error: 'Database constraint violation',
+                    message: 'Unable to reset template due to database constraints. Please contact support.',
+                    technical: error.message
+                });
+            }
+
             return res.status(500).json({
-                error: 'File system error',
-                message: 'Failed to reset template'
+                error: 'Server error',
+                message: 'Failed to reset template to default',
+                details: process.env.NODE_ENV === 'development' ? error.message : undefined
             });
+        } finally {
+            if (client) {
+                try {
+                    client.release();
+                } catch (releaseError) {
+                    console.error('Error releasing client:', releaseError);
+                }
+            }
         }
     }
 

@@ -17,8 +17,8 @@ module.exports = {
         expiresIn: '24h'
     },
     
-    cors: {
-        origins: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000']
+     cors: { 
+        origins: '*'
     },
     
     rateLimit: {

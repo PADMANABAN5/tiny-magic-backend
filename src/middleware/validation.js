@@ -1,3 +1,4 @@
+// src/middleware/validation.js
 const Joi = require('joi');
 
 // Valid template types
@@ -61,10 +62,39 @@ const resetDefaultSchema = Joi.object({
     })
 });
 
+// Chat validation schemas
+const chatCreateSchema = Joi.object({
+    user_id: Joi.string().min(1).max(255).required().messages({
+        'string.empty': 'User ID cannot be empty',
+        'any.required': 'User ID is required'
+    }),
+    conversation: Joi.array().items(Joi.object()).required().messages({
+        'array.base': 'Conversation must be an array',
+        'any.required': 'Conversation is required'
+    }),
+    status: Joi.string().valid('paused', 'completed', 'stopped', 'incomplete').optional().default('incomplete')
+});
+
+const chatUserParamsSchema = Joi.object({
+    user_id: Joi.string().min(1).max(255).required().messages({
+        'string.empty': 'User ID cannot be empty',
+        'any.required': 'User ID is required'
+    })
+});
+
+// Chat update validation schema
+const chatUpdateSchema = Joi.object({
+    status: Joi.string().valid('paused', 'completed', 'stopped', 'incomplete').required().messages({
+        'any.only': 'Status must be one of: paused, completed, stopped, incomplete',
+        'any.required': 'Status is required'
+    })
+});
+
 // Generic validation middleware factory
 const validate = (schema, source = 'body') => {
     return (req, res, next) => {
-        const data = source === 'query' ? req.query : req.body;
+        const data = source === 'query' ? req.query : 
+                     source === 'params' ? req.params : req.body;
         
         const { error, value } = schema.validate(data, {
             abortEarly: false,
@@ -88,6 +118,8 @@ const validate = (schema, source = 'body') => {
         // Replace the original data with validated data
         if (source === 'query') {
             req.query = value;
+        } else if (source === 'params') {
+            req.params = value;
         } else {
             req.body = value;
         }
@@ -103,6 +135,11 @@ const validateTemplateDelete = validate(templateDeleteSchema);
 const validateTemplateRestore = validate(templateRestoreSchema);
 const validatePromptProcess = validate(promptProcessSchema);
 const validateResetDefault = validate(resetDefaultSchema);
+
+// Chat validation middlewares
+const validateChatCreate = validate(chatCreateSchema);
+const validateChatUserParams = validate(chatUserParamsSchema, 'params');
+const validateChatUpdate = validate(chatUpdateSchema);
 
 // Custom validation for list endpoint
 const validateListQuery = (req, res, next) => {
@@ -209,6 +246,9 @@ module.exports = {
     validateResetDefault,
     validateListQuery,
     validateDefaultsQuery,
+    validateChatCreate,
+    validateChatUserParams,
+    validateChatUpdate,
     sanitizeRequest,
     sanitizeInput,
     sanitizeUsername,

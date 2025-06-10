@@ -11,16 +11,18 @@
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write src/",
-    "db:migrate": "node src/scripts/migrate.js",
+    "db:migrate": "node src/config/migrate.js",
     "db:seed": "node src/scripts/seed.js",
-    "build": "echo 'No build step required'"
+    "build": "npm run db:migrate",
+    "postinstall": "npm run db:migrate"
   },
   "keywords": [
     "templates",
     "api",
     "nodejs",
-    "mysql",
-    "versioning"
+    "postgresql",
+    "versioning",
+    "chat"
   ],
   "author": "Your Name",
   "license": "MIT",

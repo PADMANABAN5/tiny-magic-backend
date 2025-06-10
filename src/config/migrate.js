@@ -1,14 +1,16 @@
-// src/config/migrate.js - PostgreSQL Version
+
 const { pool } = require('./database');
 
 const createTables = async () => {
     let client;
     
     try {
+        console.log('🔄 Starting database migration...');
         client = await pool.connect();
         await client.query('BEGIN');
 
         // Create prompt_templates table (PostgreSQL syntax)
+        console.log('📝 Creating prompt_templates table...');
         await client.query(`
             CREATE TABLE IF NOT EXISTS prompt_templates (
                 id SERIAL PRIMARY KEY,
@@ -41,6 +43,7 @@ const createTables = async () => {
         `);
 
         // Create users table (PostgreSQL syntax)
+        console.log('👥 Creating users table...');
         await client.query(`
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
@@ -61,6 +64,7 @@ const createTables = async () => {
         `);
 
         // Create chat table with JSONB support (PostgreSQL)
+        console.log('💬 Creating chat table...');
         await client.query(`
             CREATE TABLE IF NOT EXISTS chat (
                 id SERIAL PRIMARY KEY,
@@ -91,13 +95,21 @@ const createTables = async () => {
 
         await client.query('COMMIT');
         console.log('✅ Database tables created successfully');
-        console.log('Tables created: prompt_templates, users, chat');
+        console.log('📊 Tables created: prompt_templates, users, chat');
+        console.log('🚀 Migration completed!');
 
     } catch (error) {
         if (client) {
             await client.query('ROLLBACK');
         }
-        console.error('❌ Migration failed:', error);
+        
+        // Check if it's a "relation already exists" error
+        if (error.code === '42P07') {
+            console.log('ℹ️  Tables already exist, skipping creation');
+            return;
+        }
+        
+        console.error('❌ Migration failed:', error.message);
         throw error;
     } finally {
         if (client) {
@@ -110,11 +122,11 @@ const createTables = async () => {
 if (require.main === module) {
     createTables()
         .then(() => {
-            console.log('Migration completed');
+            console.log('🎉 Migration completed successfully');
             process.exit(0);
         })
         .catch((error) => {
-            console.error('Migration failed:', error);
+            console.error('💥 Migration failed:', error.message);
             process.exit(1);
         });
 }

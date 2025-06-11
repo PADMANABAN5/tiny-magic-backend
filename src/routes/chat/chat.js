@@ -1,34 +1,31 @@
-// src/routes/chat/chat.js
+// src/routes/chat/chat.js - Complete Chat Routes
 const express = require('express');
+const router = express.Router();
 const chatController = require('../../controllers/chatController');
 
-// Import validation with error handling
-let validateChatCreate, validateChatUserParams;
-try {
-    const validation = require('../../middleware/validation');
-    validateChatCreate = validation.validateChatCreate || ((req, res, next) => next());
-    validateChatUserParams = validation.validateChatUserParams || ((req, res, next) => next());
-    console.log('✅ Chat validation loaded successfully');
-} catch (error) {
-    console.warn('❌ Chat validation not found, using no-op validators:', error.message);
-    validateChatCreate = (req, res, next) => next();
-    validateChatUserParams = (req, res, next) => next();
-}
+// MAIN WORKFLOW ENDPOINTS
 
-const router = express.Router();
+// Check session status (first call when user logs in)
+router.get('/session-status/:user_id', chatController.getSessionStatus);
 
-// POST /api/chat - Create/Save chat conversation
-// Body: { user_id, conversation, status? }
-router.post('/', validateChatCreate, chatController.createChat);
+// Create/Save new chat conversation
+router.post('/', chatController.createChat);
 
-// GET /api/chat/latest/:user_id - Get latest chat for user
-router.get('/latest/:user_id', validateChatUserParams, chatController.getLatestChat);
+// Update existing conversation (for resuming and continuing)
+router.put('/conversation/:chat_id', chatController.updateConversation);
 
-// GET /api/chat/counts/:user_id - Get chat counts by status
-router.get('/counts/:user_id', validateChatUserParams, chatController.getChatCounts);
+// UTILITY ENDPOINTS
 
-// GET /api/chat/user/:user_id - Get all chats for user (with pagination)
-// Query params: limit?, offset?, status?
-router.get('/user/:user_id', validateChatUserParams, chatController.getUserChats);
+// Get chat counts by status
+router.get('/counts/:user_id', chatController.getChatCounts);
+
+// Get chat history with filtering and pagination
+router.get('/history/:user_id', chatController.getChatHistory);
+
+// Get specific chat by ID
+router.get('/:chat_id', chatController.getChatById);
+
+// Delete chat
+router.delete('/:chat_id', chatController.deleteChat);
 
 module.exports = router;

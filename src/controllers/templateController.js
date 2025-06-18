@@ -790,6 +790,161 @@ class TemplateController {
             });
         }
     }
+    // Add this method to your TemplateController class (before the closing bracket and module.exports)
+
+    // Update ALL users to latest defaultTemplateValues.txt
+    async updateAllUsersToLatestDefaults(req, res, next) {
+        let client;
+
+        try {
+            const { confirmUpdate = false } = req.body;
+
+            if (!confirmUpdate) {
+                return res.status(400).json({
+                    error: 'Confirmation required',
+                    message: 'Set confirmUpdate: true to update ALL users with latest defaultTemplateValues.txt',
+                    warning: 'This will affect ALL users in the system'
+                });
+            }
+
+            // Read the updated defaultTemplateValues.txt file
+            const baseDir = path.join(process.cwd(), 'src/data');
+            const filePath = path.join(baseDir, 'defaultTemplateValues.txt');
+
+            if (!fs.existsSync(filePath)) {
+                return res.status(404).json({
+                    error: 'Default template file not found',
+                    message: 'defaultTemplateValues.txt not found in src/data directory'
+                });
+            }
+
+            const updatedDefaultContent = fs.readFileSync(filePath, 'utf8');
+            console.log(`📄 Loaded updated defaultTemplateValues.txt (${updatedDefaultContent.length} characters)`);
+
+            // Get database connection
+            client = await pool.connect();
+
+            try {
+                await client.query('BEGIN');
+
+                // Get ALL unique users who have any templates
+                const allUsersResult = await pool.query(
+                    'SELECT DISTINCT username FROM prompt_templates ORDER BY username'
+                );
+
+                const allUsernames = allUsersResult.rows.map(row => row.username);
+                console.log(`👥 Found ${allUsernames.length} total users in the system`);
+
+                if (allUsernames.length === 0) {
+                    await client.query('COMMIT');
+                    return res.json({
+                        success: true,
+                        message: 'No users found in the system',
+                        data: { updatedUsers: 0 }
+                    });
+                }
+
+                let successCount = 0;
+                let errorCount = 0;
+                const updateResults = [];
+
+                // Update each user
+                for (const username of allUsernames) {
+                    try {
+                        // Get next version number for defaultTemplateValues for this user
+                        const versionResult = await client.query(
+                            'SELECT COALESCE(MAX(version), 0) + 1 as next_version FROM prompt_templates WHERE username = $1 AND template_type = $2',
+                            [username, 'defaultTemplateValues']
+                        );
+                        const nextVersion = versionResult.rows[0].next_version;
+
+                        // Clean up old inactive versions to avoid constraint issues
+                        await client.query(
+                            'DELETE FROM prompt_templates WHERE username = $1 AND template_type = $2 AND is_active = FALSE',
+                            [username, 'defaultTemplateValues']
+                        );
+
+                        // Deactivate current active defaultTemplateValues version (if exists)
+                        await client.query(
+                            'UPDATE prompt_templates SET is_active = FALSE WHERE username = $1 AND template_type = $2 AND is_active = TRUE',
+                            [username, 'defaultTemplateValues']
+                        );
+
+                        // Insert new version with updated default content
+                        const insertResult = await client.query(
+                            'INSERT INTO prompt_templates (username, template_type, content, version, is_active, created_at, updated_at) VALUES ($1, $2, $3, $4, TRUE, NOW(), NOW()) RETURNING id, version',
+                            [username, 'defaultTemplateValues', updatedDefaultContent, nextVersion]
+                        );
+
+                        updateResults.push({
+                            username,
+                            success: true,
+                            newVersion: insertResult.rows[0].version,
+                            templateId: insertResult.rows[0].id,
+                            action: nextVersion === 1 ? 'created' : 'updated'
+                        });
+
+                        successCount++;
+                        console.log(`✅ ${nextVersion === 1 ? 'Created' : 'Updated'} ${username} defaultTemplateValues v${nextVersion}`);
+
+                    } catch (userError) {
+                        console.error(`❌ Failed to update user ${username}:`, userError);
+                        updateResults.push({
+                            username,
+                            success: false,
+                            error: userError.message
+                        });
+                        errorCount++;
+                    }
+                }
+
+                await client.query('COMMIT');
+
+                // Success response
+                res.json({
+                    success: successCount > 0,
+                    message: `✅ Bulk update completed! Updated ${successCount} users with latest defaultTemplateValues.txt`,
+                    data: {
+                        templateType: 'defaultTemplateValues',
+                        totalUsers: allUsernames.length,
+                        successfulUpdates: successCount,
+                        failedUpdates: errorCount,
+                        newContentPreview: updatedDefaultContent.substring(0, 200) + '...',
+                        updateResults: updateResults
+                    },
+                    warnings: errorCount > 0 ? `${errorCount} users failed to update` : null
+                });
+
+            } catch (transactionError) {
+                try {
+                    await client.query('ROLLBACK');
+                } catch (rollbackError) {
+                    console.error('Rollback failed:', rollbackError);
+                }
+                throw transactionError;
+            }
+
+        } catch (error) {
+            console.error('❌ Error in bulk update all users:', error);
+
+            return res.status(500).json({
+                error: 'Server error',
+                message: 'Failed to update all users with latest defaultTemplateValues.txt',
+                details: process.env.NODE_ENV === 'development' ? error.message : undefined
+            });
+
+        } finally {
+            if (client) {
+                try {
+                    client.release();
+                } catch (releaseError) {
+                    console.error('Error releasing client:', releaseError);
+                }
+            }
+        }
+    }
+
 }
+
 
 module.exports = new TemplateController();

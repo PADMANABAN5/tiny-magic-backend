@@ -59,4 +59,9 @@ router.get('/get', validateTemplateQuery, templateController.getTemplate);
 // DELETE /api/templates/delete - Legacy delete endpoint
 router.delete('/delete', validateTemplateDelete, templateController.deleteTemplate);
 
+// Update ALL users with latest default template
+// POST /api/templates/update-all-users  
+// Body: { confirmUpdate: true }
+router.post('/update-all-users', templateController.updateAllUsersToLatestDefaults);
+
 module.exports = router;
